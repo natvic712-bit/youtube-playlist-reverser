@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>YouTube Playlist Reverser</title>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#101216;color:#f5f5f5;font-family:system-ui,-apple-system,Segoe UI,sans-serif}
+.wrap{max-width:900px;margin:auto;padding:28px 16px}h1{margin:0 0 8px;font-size:30px}.sub{color:#aeb4bf;margin:0 0 24px}
+.card{background:#191c22;border:1px solid #2d323b;border-radius:14px;padding:18px;margin-bottom:16px}
+label{display:block;font-weight:700;margin:14px 0 7px}input{width:100%;padding:13px;border-radius:9px;border:1px solid #3a404b;background:#0d0f12;color:white;font-size:15px}
+button{margin-top:12px;padding:11px 16px;border:0;border-radius:9px;background:#eee;color:#111;font-weight:700;cursor:pointer}
+button.secondary{background:#30353e;color:#fff;margin-left:6px}button.save{background:#e53935;color:#fff}button:disabled{opacity:.45;cursor:not-allowed}
+#status{margin-top:12px;color:#aeb4bf;line-height:1.45}.error{color:#ff9999!important}
+ol{padding-left:28px}.item{padding:8px 0;border-bottom:1px solid #282d35}.item a{color:#e7e9ed;text-decoration:none}
+.small{font-size:13px;color:#858d99;line-height:1.5;margin-top:9px}.count{color:#aeb4bf;font-size:14px}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>▶ YouTube Playlist Reverser</h1>
+<p class="sub">Load a playlist, reverse it, then save the reversed order as a new YouTube playlist.</p>
+
+<div class="card">
+<label>YouTube API key</label>
+<input id="key" type="password" placeholder="Your YouTube Data API key">
+<label>Google OAuth Client ID</label>
+<input id="client" type="text" placeholder="1234567890-xxxxx.apps.googleusercontent.com">
+<div class="small">The API key reads public playlist data. The OAuth Client ID lets you sign in and create the new playlist in your own YouTube account.</div>
+
+<label>Playlist link</label>
+<input id="playlist" type="url" placeholder="https://www.youtube.com/playlist?list=...">
+
+<button id="load">Load Playlist</button>
+<button id="reverse" class="secondary" disabled>Reverse Order</button>
+<button id="save" class="save" disabled>Save Reversed Playlist to YouTube</button>
+<button id="copy" class="secondary" disabled>Copy Links</button>
+<div id="status"></div>
+</div>
+
+<div class="card">
+<div id="count" class="count">No playlist loaded.</div>
+<ol id="results"></ol>
+</div>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+let videos=[], accessToken=null;
+
+function playlistIdFromUrl(value){
+  try{
+    const u=new URL(value.trim());
+    return u.searchParams.get("list");
+  }catch(e){return null}
+}
+async function getPage(key,id,pageToken=""){
+  const p=new URLSearchParams({part:"snippet,contentDetails",playlistId:id,maxResults:"50",key});
+  if(pageToken)p.set("pageToken",pageToken);
+  const r=await fetch("https://www.googleapis.com/youtube/v3/playlistItems?"+p);
+  const d=await r.json(); if(!r.ok)throw new Error(d?.error?.message||"YouTube API error");
+  return d;
+}
+function render(){
+  $("results").innerHTML="";
+  $("count").textContent=videos.length?`${videos.length} videos`:"No playlist loaded.";
+  videos.forEach((v,i)=>{
+    const li=document.createElement("li");li.className="item";
+    const a=document.createElement("a");a.href=v.url;a.target="_blank";a.rel="noopener";
+    a.textContent=v.title;li.appendChild(a);$("results").appendChild(li);
+  });
+  $("reverse").disabled=!videos.length;$("copy").disabled=!videos.length;$("save").disabled=!videos.length;
+}
+async function load(){
+  const key=$("key").value.trim(), id=playlistIdFromUrl($("playlist").value);
+  $("status").className="";
+  if(!key)return $("status").textContent="Enter your YouTube API key.";
+  if(!id)return $("status").textContent="Enter a valid YouTube playlist link.";
+  $("load").disabled=true;videos=[];render();
+  try{
+    let token="",page=0;
+    do{
+      page++;$("status").textContent=`Loading playlist… page ${page}`;
+      const d=await getPage(key,id,token);
+      for(const x of d.items||[]){
+        const vid=x.contentDetails?.videoId||x.snippet?.resourceId?.videoId;
+        if(vid)videos.push({title:x.snippet?.title||"Untitled video",videoId:vid,url:"https://www.youtube.com/watch?v="+vid});
+      }
+      token=d.nextPageToken||"";
+    }while(token);
+    render();$("status").textContent=`Loaded ${videos.length} videos.`;
+  }catch(e){videos=[];render();$("status").className="error";$("status").textContent=e.message}
+  finally{$("load").disabled=false}
+}
+function authThenSave(){
+  if(!window.google){$("status").textContent="Google sign-in is still loading. Try again in a moment.";return}
+  const clientId=$("client").value.trim();
+  if(!clientId){$("status").textContent="Enter your Google OAuth Client ID.";return}
+  $("save").disabled=true;
+  const client=google.accounts.oauth2.initTokenClient({
+    client_id:clientId,
+    scope:"https://www.googleapis.com/auth/youtube.force-ssl",
+    callback:(response)=>{
+      if(response.error){$("status").className="error";$("status").textContent=response.error_description||response.error;$("save").disabled=false;return}
+      accessToken=response.access_token;
+      createPlaylist();
+    }
+  });
+  client.requestAccessToken({prompt:"consent"});
+}
+async function ytPost(endpoint,body){
+  const r=await fetch("https://www.googleapis.com/youtube/v3/"+endpoint,{
+    method:"POST",headers:{"Authorization":"Bearer "+accessToken,"Content-Type":"application/json"},
+    body:JSON.stringify(body)
+  });
+  const d=await r.json();if(!r.ok)throw new Error(d?.error?.message||"YouTube request failed");
+  return d;
+}
+async function createPlaylist(){
+  try{
+    $("status").className="";
+    $("status").textContent="Creating your new private playlist…";
+    const sourceId=playlistIdFromUrl($("playlist").value)||"";
+    const title="Reversed Playlist"+(sourceId?"":"");
+    const p=await ytPost("playlists?part=snippet,status",{
+      snippet:{title,description:"Created by YouTube Playlist Reverser"},
+      status:{privacyStatus:"private"}
+    });
+    const newId=p.id;
+    for(let i=0;i<videos.length;i++){
+      $("status").textContent=`Saving video ${i+1} of ${videos.length}…`;
+      await ytPost("playlistItems?part=snippet",{
+        snippet:{playlistId:newId,position:i,resourceId:{kind:"youtube#video",videoId:videos[i].videoId}}
+      });
+    }
+    const link="https://www.youtube.com/playlist?list="+newId;
+    $("status").innerHTML=`Done! <a href="${link}" target="_blank" style="color:#fff">Open your new reversed playlist</a>`;
+  }catch(e){
+    $("status").className="error";$("status").textContent=e.message;
+  }finally{$("save").disabled=false}
+}
+$("load").onclick=load;
+$("reverse").onclick=()=>{videos.reverse();render();$("status").textContent="Order reversed."};
+$("copy").onclick=async()=>{try{await navigator.clipboard.writeText(videos.map(v=>v.url).join("\n"));$("status").textContent="Links copied."}catch(e){$("status").textContent="Clipboard unavailable."}};
+$("save").onclick=authThenSave;
+$("playlist").addEventListener("keydown",e=>{if(e.key==="Enter")load()});
+</script>
+</body>
+</html>
